@@ -88,9 +88,12 @@
 <script>
   // CLIENT-SIDE BOUNDARY — runs in the browser only.
   //
-  // Because this code lives in a client <script>, browser storage APIs are
-  // safe to use here without breaking the static build. All the pure logic
-  // (URL normalization, slug generation, storage validation, formatting)
+  // Because this code lives in a client <script>, localStorage and other
+  // browser storage APIs are safe to use here without breaking the static
+  // build. This component persists bookmarks via localStorage (see
+  // loadBookmarks/saveBookmarks below), which read/write the
+  // "mona-bookmarks" localStorage key. All the pure logic (URL
+  // normalization, slug generation, localStorage validation, formatting)
   // lives in ../lib/bookmarks.ts and is covered by unit tests there.
   import {
     formatBookmark,
