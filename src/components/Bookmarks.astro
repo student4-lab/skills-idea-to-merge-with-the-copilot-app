@@ -5,7 +5,8 @@
 // adding a bookmark, generating a short slug, and persisting to the browser —
 // runs ONLY in the client-side <script> boundary at the bottom of this
 // file. Astro runs that script in the browser, never during the build, so
-// browser-only APIs are safe there.
+// browser-only APIs are safe there. The storage/formatting/slug logic itself
+// lives in ../lib/bookmarks.ts as plain, unit-testable functions.
 ---
 <form id="add-bookmark">
   <div class="field">
@@ -24,7 +25,7 @@
   <button type="submit">Add bookmark</button>
 </form>
 
-<p class="hint">Paste a URL and select <strong>Add bookmark</strong> to generate its short <code>mona-</code> slug.</p>
+<p class="hint">Paste a URL (with or without <code>https://</code>) and select <strong>Add bookmark</strong> to generate its short <code>mona-</code> slug.</p>
 
 <p id="empty-state" class="empty">No bookmarks yet — add your first link above.</p>
 
@@ -37,18 +38,68 @@
   <!-- Bookmarks render here in the browser. -->
 </ul>
 
+<style>
+  #add-bookmark {
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem;
+  }
+
+  #bookmark-list {
+    margin-top: 0.5rem;
+  }
+
+  li.bookmark {
+    background: color-mix(in srgb, canvas 96%, var(--accent) 4%);
+    transition: border-color 0.15s ease;
+  }
+  li.bookmark:hover {
+    border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  }
+
+  .bookmark .entry {
+    flex: 1 1 14rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.35rem;
+    overflow-wrap: anywhere;
+    font-family: var(--font-body);
+  }
+  .bookmark .url {
+    font-family: var(--font-head);
+    font-weight: 600;
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .bookmark .url:hover,
+  .bookmark .url:focus-visible {
+    text-decoration: underline;
+  }
+  .bookmark .sep {
+    color: var(--muted);
+  }
+  .bookmark .slug {
+    font-family: var(--font-body);
+  }
+</style>
+
 <script>
   // CLIENT-SIDE BOUNDARY — runs in the browser only.
   //
   // Because this code lives in a client <script>, browser storage APIs are
-  // safe to use here without breaking the static build.
-
-  const STORAGE_KEY = 'mona-bookmarks';
-
-  interface Bookmark {
-    url: string;
-    slug: string;
-  }
+  // safe to use here without breaking the static build. All the pure logic
+  // (URL normalization, slug generation, storage validation, formatting)
+  // lives in ../lib/bookmarks.ts and is covered by unit tests there.
+  import {
+    formatBookmark,
+    generateUniqueSlug,
+    loadBookmarks,
+    normalizeUrl,
+    saveBookmarks,
+    type Bookmark,
+  } from '../lib/bookmarks';
 
   const form = document.getElementById('add-bookmark') as HTMLFormElement | null;
   const urlInput = document.getElementById('url') as HTMLInputElement | null;
@@ -56,46 +107,6 @@
   const emptyState = document.getElementById('empty-state');
   const listHeader = document.getElementById('list-header');
   const clearAllButton = document.getElementById('clear-all');
-
-  function loadBookmarks(): Bookmark[] {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? (JSON.parse(raw) as Bookmark[]) : [];
-    } catch {
-      return [];
-    }
-  }
-
-  function saveBookmarks(bookmarks: Bookmark[]) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(bookmarks));
-  }
-
-  // Generates a short, locally-computed "mona-" slug. No network calls or
-  // external services are involved.
-  function generateSlug(existing: Bookmark[]): string {
-    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-    let slug: string;
-    do {
-      let random = '';
-      for (let i = 0; i < 6; i++) {
-        random += chars[Math.floor(Math.random() * chars.length)];
-      }
-      slug = `mona-${random}`;
-    } while (existing.some((bookmark) => bookmark.slug === slug));
-    return slug;
-  }
-
-  function normalizeUrl(value: string): string | null {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    try {
-      // Allow bare "example.com" input by defaulting to https://.
-      const withProtocol = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
-      return new URL(withProtocol).toString();
-    } catch {
-      return null;
-    }
-  }
 
   function render(bookmarks: Bookmark[]) {
     if (!list || !emptyState || !listHeader) return;
@@ -110,6 +121,10 @@
       const item = document.createElement('li');
       item.className = 'bookmark';
 
+      const entry = document.createElement('span');
+      entry.className = 'entry';
+      entry.title = formatBookmark(bookmark);
+
       const link = document.createElement('a');
       link.className = 'url';
       link.href = bookmark.url;
@@ -117,9 +132,15 @@
       link.rel = 'noopener noreferrer';
       link.textContent = bookmark.url;
 
+      const separator = document.createElement('span');
+      separator.className = 'sep';
+      separator.textContent = ' :: ';
+
       const slugBadge = document.createElement('span');
       slugBadge.className = 'slug';
       slugBadge.textContent = bookmark.slug;
+
+      entry.append(link, separator, slugBadge);
 
       const copyButton = document.createElement('button');
       copyButton.type = 'button';
@@ -138,39 +159,47 @@
         }
       });
 
-      item.append(link, slugBadge, copyButton);
+      item.append(entry, copyButton);
       list.append(item);
     }
   }
 
   function addBookmark(url: string) {
     const bookmarks = loadBookmarks();
-    const slug = generateSlug(bookmarks);
+    const slug = generateUniqueSlug(bookmarks);
     bookmarks.push({ url, slug });
     saveBookmarks(bookmarks);
     render(bookmarks);
   }
 
   form?.addEventListener('submit', (event) => {
-    event.preventDefault(); // keep this — stops the page from reloading
-    if (!urlInput) return;
+    // Keep this call FIRST, unconditionally: even if something later in this
+    // handler throws, the form must never fall back to a native submit that
+    // reloads the page and loses the URL the user typed.
+    event.preventDefault();
 
-    const normalized = normalizeUrl(urlInput.value);
-    if (!normalized) {
-      urlInput.setCustomValidity('Please enter a valid URL.');
-      urlInput.reportValidity();
-      return;
+    try {
+      if (!urlInput) return;
+
+      const normalized = normalizeUrl(urlInput.value);
+      if (!normalized) {
+        urlInput.setCustomValidity('Please enter a valid URL.');
+        urlInput.reportValidity();
+        return;
+      }
+      urlInput.setCustomValidity('');
+
+      addBookmark(normalized);
+      form.reset();
+      urlInput.focus();
+    } catch (error) {
+      console.error('Failed to add bookmark:', error);
     }
-    urlInput.setCustomValidity('');
-
-    addBookmark(normalized);
-    form.reset();
-    urlInput.focus();
   });
 
   clearAllButton?.addEventListener('click', () => {
     if (!confirm('Remove all saved bookmarks?')) return;
-    localStorage.removeItem(STORAGE_KEY);
+    saveBookmarks([]);
     render([]);
   });
 
